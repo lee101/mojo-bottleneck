@@ -1,12 +1,16 @@
 """Float64 kernels exported through a small C ABI."""
 
-from std.math import isnan, sqrt
+from std.math import isnan, nan, sqrt
+from max.algorithm import parallelize
 from std.sys import simd_width_of
 
 comptime FPtr = Pointer[Float64, AnyOrigin[mut=True]]
 comptime IPtr = Pointer[Int64, AnyOrigin[mut=True]]
 comptime PARALLEL_THRESHOLD = 262144
 comptime PARALLEL_CHUNK = 262144
+comptime MAX_PARALLEL_WORKERS = 16
+comptime SUM_PARALLEL_WORKERS = 4
+comptime NAN = nan[DType.float64]()
 
 
 def fptr(addr: Int) -> FPtr:
@@ -121,14 +125,29 @@ def select_value(src: FPtr, base: Int, n: Int, kth: Int) -> Float64:
 
 
 def nanmedian_kernel(src: FPtr, dst: FPtr, outer: Int, n: Int):
+    comptime W = simd_width_of[DType.float64]()
     for row in range(outer):
         var base = row * n
         var count = 0
-        for j in range(n):
+        var j = 0
+        while j + W <= n:
+            var values = src.unsafe_load[width=W](base + j)
+            var valid = ~isnan(values)
+            if valid.reduce_and():
+                src.unsafe_store[alignment=1](base + count, values)
+                count += W
+            else:
+                for lane in range(W):
+                    if valid[lane]:
+                        src[unsafe_offset=base + count] = values[lane]
+                        count += 1
+            j += W
+        while j < n:
             var v = src[unsafe_offset=base + j]
             if not isnan(v):
                 src[unsafe_offset=base + count] = v
                 count += 1
+            j += 1
         if count == 0:
             continue
         var high = select_value(src, base, count, count // 2)
@@ -204,6 +223,8 @@ def move_sum_mean_range[
                     dst[unsafe_offset=base + j] = acc / Float64(count)
             else:
                 dst[unsafe_offset=base + j] = acc
+        else:
+            dst[unsafe_offset=base + j] = NAN
 
 
 def move_sum_mean_kernel(
@@ -215,6 +236,26 @@ def move_sum_mean_kernel(
     min_count: Int,
     mean_mode: Bool,
 ):
+    var chunks_per_row = (n + PARALLEL_CHUNK - 1) // PARALLEL_CHUNK
+    var tasks = outer * chunks_per_row
+    if outer * n >= PARALLEL_THRESHOLD and tasks > 1:
+
+        def work(task: Int) capturing:
+            var row = task // chunks_per_row
+            var chunk = task - row * chunks_per_row
+            var start = chunk * PARALLEL_CHUNK
+            var end = min(n, start + PARALLEL_CHUNK)
+            if mean_mode:
+                move_sum_mean_range[True](
+                    src, dst, n, row, start, end, window, min_count
+                )
+            else:
+                move_sum_mean_range[False](
+                    src, dst, n, row, start, end, window, min_count
+                )
+
+        parallelize[work](tasks, min(tasks, SUM_PARALLEL_WORKERS))
+        return
     if mean_mode:
         for row in range(outer):
             move_sum_mean_range[True](src, dst, n, row, 0, n, window, min_count)
@@ -278,6 +319,8 @@ def move_var_range[
                 dst[unsafe_offset=base + j] = sqrt(variance)
             else:
                 dst[unsafe_offset=base + j] = variance
+        else:
+            dst[unsafe_offset=base + j] = NAN
 
 
 def move_var_impl[
@@ -309,8 +352,7 @@ def move_var_impl[
             src, dst, n, row, start, end, window, min_count, ddof
         )
 
-    for task in range(tasks):
-        work(task)
+    parallelize[work](tasks, min(tasks, MAX_PARALLEL_WORKERS))
 
 
 def move_var_kernel(
@@ -396,6 +438,8 @@ def move_extreme_range[
                     scratch[unsafe_offset=scratch_base + head % window]
                 )
             ]
+        else:
+            dst[unsafe_offset=j] = NAN
 
 
 def move_extreme_impl[
@@ -432,8 +476,7 @@ def move_extreme_impl[
                 task * window,
             )
 
-        for task in range(tasks):
-            work(task)
+        parallelize[work](tasks, min(tasks, MAX_PARALLEL_WORKERS))
         return
     for row in range(outer):
         var base = row * n
@@ -466,6 +509,8 @@ def move_extreme_impl[
                 dst[unsafe_offset=base + j] = src[
                     unsafe_offset=base + Int(scratch[unsafe_offset=head])
                 ]
+            else:
+                dst[unsafe_offset=base + j] = NAN
 
 
 def move_extreme_kernel(

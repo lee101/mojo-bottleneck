@@ -82,18 +82,21 @@ warm runs on one-dimensional `float64` inputs containing NaNs. A ratio above
 
 | operation | mojo-bottleneck | bottleneck | upstream / Mojo |
 |---|---:|---:|---:|
-| nansum, 5M | 5.81 ms | 7.05 ms | 1.21x |
-| nanmean, 5M | 6.37 ms | 7.89 ms | 1.24x |
-| nanstd, 5M | 12.73 ms | 20.13 ms | 1.58x |
-| nanmedian, 1M | 15.38 ms | 14.01 ms | 0.91x |
-| move_sum, 5M w=100 | 55.01 ms | 50.73 ms | 0.92x |
-| move_var, 5M w=100 | 45.86 ms | 56.92 ms | 1.24x |
-| move_min, 5M w=100 | 90.10 ms | 119.70 ms | 1.33x |
-| move_max, 5M w=100 | 72.65 ms | 95.21 ms | 1.31x |
+| nansum, 5M | 4.89 ms | 5.61 ms | 1.15x |
+| nanmean, 5M | 4.73 ms | 5.89 ms | 1.25x |
+| nanstd, 5M | 8.09 ms | 11.90 ms | 1.47x |
+| nanmedian, 1M | 11.24 ms | 10.75 ms | 0.96x |
+| move_sum, 5M w=100 | 15.16 ms | 23.58 ms | 1.55x |
+| move_var, 5M w=100 | 20.02 ms | 38.63 ms | 1.93x |
+| move_min, 5M w=100 | 46.69 ms | 94.94 ms | 2.03x |
+| move_max, 5M w=100 | 45.22 ms | 76.64 ms | 1.69x |
 
-Mojo wins on six of the eight measured kernels in this run. It is behind on
-`nanmedian` and `move_sum`. These timings include Python wrapper and
-output-allocation costs. No GPU path is provided.
+Mojo wins on seven of the eight measured kernels in this run and is near
+parity on `nanmedian`. These timings include Python wrapper and
+output-allocation costs. No GPU path is provided: the covered reductions and
+rolling kernels are memory-bound or recurrence-bound and remain below the
+roughly two-flops-per-byte threshold where transfer and launch costs can pay
+off.
 
 ## How it works
 
@@ -108,11 +111,13 @@ Python memory.
 
 Reductions traverse independent contiguous rows. Variance uses a stable
 two-pass algorithm; numeric reductions process full SIMD-width blocks followed
-by a scalar tail. `nanmedian` compacts non-NaN values into a private copy before
-in-place quickselect. Moving sums and means use rolling accumulators, moving
-variance uses Welford insertion and removal updates, and moving extrema use an
-O(n) monotonic deque. Large moving variance and extrema inputs are divided into
-independent chunks, while inputs below the parallel threshold stay serial.
+by a scalar tail. `nanmedian` compacts non-NaN values into a private copy with
+SIMD loads and bulk stores before in-place quickselect. Moving sums and means
+use rolling accumulators, moving variance uses Welford insertion and removal
+updates, and moving extrema use an O(n) monotonic deque. Large moving inputs
+are divided into independent chunks, while inputs below the parallel threshold
+stay serial. Moving kernels allocate uninitialized output and write every
+result or NaN exactly once instead of pre-filling the whole array.
 Non-last axes are restored to the original array layout before returning.
 Float32 results are cast back to float32, integer moving-window results follow
 Bottleneck's float64 convention, and uncommon floating reduction dtypes use

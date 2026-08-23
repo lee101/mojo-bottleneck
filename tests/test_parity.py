@@ -113,7 +113,9 @@ def test_large_offset_moving_variance_is_stable():
 
 
 @pytest.mark.parametrize("size", [5, 7, 33])
-@pytest.mark.parametrize("name", ["nansum", "nanmean", "nanvar", "nanstd"])
+@pytest.mark.parametrize(
+    "name", ["nansum", "nanmean", "nanvar", "nanstd", "nanmedian"]
+)
 def test_reduction_simd_tail(name, size):
     data = np.linspace(-3.0, 5.0, size)
     data[1::4] = np.nan
@@ -123,7 +125,9 @@ def test_reduction_simd_tail(name, size):
 
 
 @pytest.mark.parametrize("size", [262_143, 262_145])
-@pytest.mark.parametrize("name", ["move_var", "move_min", "move_max"])
+@pytest.mark.parametrize(
+    "name", ["move_sum", "move_mean", "move_var", "move_min", "move_max"]
+)
 def test_moving_parallel_threshold(name, size):
     rng = np.random.default_rng(81)
     data = rng.normal(size=size)
@@ -132,6 +136,17 @@ def test_moving_parallel_threshold(name, size):
     expected = getattr(upstream, name)(data, **kwargs)
     actual = getattr(mb, name)(data, **kwargs)
     assert np.allclose(actual, expected, equal_nan=True, rtol=2e-12, atol=2e-12)
+
+
+@pytest.mark.parametrize(
+    "name", ["move_sum", "move_mean", "move_var", "move_std", "move_min", "move_max"]
+)
+def test_moving_kernels_write_invalid_outputs(name):
+    data = np.array([np.nan, 2.0, np.nan, 4.0, np.nan])
+    kwargs = dict(window=3, min_count=3)
+    expected = getattr(upstream, name)(data, **kwargs)
+    actual = getattr(mb, name)(data, **kwargs)
+    assert np.allclose(actual, expected, equal_nan=True)
 
 
 @pytest.mark.parametrize("name", ["nansum", "nanmean", "nanvar", "nanstd"])

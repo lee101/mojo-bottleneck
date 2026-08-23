@@ -225,7 +225,7 @@ def _move_args(a, window, min_count, axis):
     moved = np.moveaxis(array, normalized, -1)
     work = np.ascontiguousarray(moved, dtype=np.float64)
     rows = work.reshape(-1, work.shape[-1])
-    result = np.full_like(work, np.nan, dtype=np.float64)
+    result = np.empty_like(work, dtype=np.float64)
     return array, normalized, window, min_count, rows, result
 
 
