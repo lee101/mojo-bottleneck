@@ -1,14 +1,12 @@
 """Float64 kernels exported through a small C ABI."""
 
-from std.algorithm import parallelize
 from std.math import isnan, sqrt
 from std.sys import simd_width_of
 
-comptime FPtr = UnsafePointer[Float64, AnyOrigin[mut=True]]
-comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
+comptime FPtr = Pointer[Float64, AnyOrigin[mut=True]]
+comptime IPtr = Pointer[Int64, AnyOrigin[mut=True]]
 comptime PARALLEL_THRESHOLD = 262144
 comptime PARALLEL_CHUNK = 262144
-comptime PARALLEL_WORKERS = 16
 
 
 def fptr(addr: Int) -> FPtr:
@@ -19,9 +17,7 @@ def iptr(addr: Int) -> IPtr:
     return IPtr(unsafe_from_address=addr)
 
 
-def reduce_kernel(
-    src: FPtr, dst: FPtr, outer: Int, n: Int, op: Int, ddof: Int
-):
+def reduce_kernel(src: FPtr, dst: FPtr, outer: Int, n: Int, op: Int, ddof: Int):
     comptime W = simd_width_of[DType.float64]()
     for row in range(outer):
         var base = row * n
@@ -30,18 +26,18 @@ def reduce_kernel(
         if op == 6 or op == 7:
             var answer = op == 7
             for j in range(n):
-                if isnan(src[base + j]):
+                if isnan(src[unsafe_offset=base + j]):
                     if op == 6:
                         answer = True
                         break
                 elif op == 7:
                     answer = False
                     break
-            dst[row] = 1.0 if answer else 0.0
+            dst[unsafe_offset=row] = 1.0 if answer else 0.0
             continue
         if op == 4 or op == 5:
             for j in range(n):
-                var v = src[base + j]
+                var v = src[unsafe_offset=base + j]
                 if isnan(v):
                     continue
                 if count == 0:
@@ -52,67 +48,67 @@ def reduce_kernel(
                     acc = v
                 count += 1
             if count > 0:
-                dst[row] = acc
+                dst[unsafe_offset=row] = acc
             continue
 
         var vector_acc = SIMD[DType.float64, W](0.0)
         var j = 0
         while j + W <= n:
-            var values = src.load[width=W](base + j)
+            var values = src.unsafe_load[width=W](base + j)
             var valid = ~isnan(values)
             vector_acc += valid.select(values, 0.0)
             count += Int(valid.cast[DType.int64]().reduce_add())
             j += W
         acc = vector_acc.reduce_add()
         while j < n:
-            var v = src[base + j]
+            var v = src[unsafe_offset=base + j]
             if not isnan(v):
                 acc += v
                 count += 1
             j += 1
         if op == 0:
-            dst[row] = acc
+            dst[unsafe_offset=row] = acc
         elif op == 1:
             if count > 0:
-                dst[row] = acc / Float64(count)
+                dst[unsafe_offset=row] = acc / Float64(count)
         elif (op == 2 or op == 3) and count > 0 and count - ddof > 0:
             var mean = acc / Float64(count)
             var squared = 0.0
             var vector_squared = SIMD[DType.float64, W](0.0)
             j = 0
             while j + W <= n:
-                var values = src.load[width=W](base + j)
+                var values = src.unsafe_load[width=W](base + j)
                 var valid = ~isnan(values)
                 var delta = valid.select(values - mean, 0.0)
                 vector_squared += delta * delta
                 j += W
             squared = vector_squared.reduce_add()
             while j < n:
-                var v = src[base + j]
+                var v = src[unsafe_offset=base + j]
                 if not isnan(v):
                     var delta = v - mean
                     squared += delta * delta
                 j += 1
             var variance = squared / Float64(count - ddof)
-            dst[row] = sqrt(variance) if op == 3 else variance
+            dst[unsafe_offset=row] = sqrt(variance) if op == 3 else variance
 
 
 def select_value(src: FPtr, base: Int, n: Int, kth: Int) -> Float64:
     var left = 0
     var right = n - 1
     while left < right:
-        var pivot = src[base + (left + right) // 2]
+        var pivot = src[unsafe_offset=base + (left + right) // 2]
         var i = left
         var j = right
         while i <= j:
-            while src[base + i] < pivot:
+            while src[unsafe_offset=base + i] < pivot:
                 i += 1
-            while src[base + j] > pivot:
+            while src[unsafe_offset=base + j] > pivot:
                 j -= 1
             if i <= j:
-                var swap = src[base + i]
-                src[base + i] = src[base + j]
-                src[base + j] = swap
+                var swap = src[unsafe_offset=base + i]
+                src[unsafe_offset=base + i] = src[unsafe_offset=base + j]
+                src[unsafe_offset=base + j] = swap
                 i += 1
                 j -= 1
         if kth <= j:
@@ -121,7 +117,7 @@ def select_value(src: FPtr, base: Int, n: Int, kth: Int) -> Float64:
             left = i
         else:
             break
-    return src[base + kth]
+    return src[unsafe_offset=base + kth]
 
 
 def nanmedian_kernel(src: FPtr, dst: FPtr, outer: Int, n: Int):
@@ -129,18 +125,18 @@ def nanmedian_kernel(src: FPtr, dst: FPtr, outer: Int, n: Int):
         var base = row * n
         var count = 0
         for j in range(n):
-            var v = src[base + j]
+            var v = src[unsafe_offset=base + j]
             if not isnan(v):
-                src[base + count] = v
+                src[unsafe_offset=base + count] = v
                 count += 1
         if count == 0:
             continue
         var high = select_value(src, base, count, count // 2)
         if count % 2 == 0:
             var low = select_value(src, base, count, count // 2 - 1)
-            dst[row] = low * 0.5 + high * 0.5
+            dst[unsafe_offset=row] = low * 0.5 + high * 0.5
         else:
-            dst[row] = high
+            dst[unsafe_offset=row] = high
 
 
 def arg_reduce_kernel(
@@ -153,21 +149,27 @@ def arg_reduce_kernel(
         var best = 0.0
         var best_index = 0
         for j in range(n):
-            var v = src[base + j]
+            var v = src[unsafe_offset=base + j]
             if isnan(v):
                 continue
-            if not found or (find_max and v > best) or (not find_max and v < best):
+            if (
+                not found
+                or (find_max and v > best)
+                or (not find_max and v < best)
+            ):
                 found = True
                 best = v
                 best_index = j
         if found:
-            dst[row] = Int64(best_index)
+            dst[unsafe_offset=row] = Int64(best_index)
         else:
             invalid += 1
     return invalid
 
 
-def move_sum_mean_range[mean_mode: Bool](
+def move_sum_mean_range[
+    mean_mode: Bool
+](
     src: FPtr,
     dst: FPtr,
     n: Int,
@@ -182,26 +184,26 @@ def move_sum_mean_range[mean_mode: Bool](
     var count = 0
     var initial = max(0, start - window)
     for j in range(initial, start):
-        var value = src[base + j]
+        var value = src[unsafe_offset=base + j]
         if not isnan(value):
             acc += value
             count += 1
     for j in range(start, end):
-        var entering = src[base + j]
+        var entering = src[unsafe_offset=base + j]
         if not isnan(entering):
             acc += entering
             count += 1
         if j >= window:
-            var leaving = src[base + j - window]
+            var leaving = src[unsafe_offset=base + j - window]
             if not isnan(leaving):
                 acc -= leaving
                 count -= 1
         if count >= min_count:
             comptime if mean_mode:
                 if count > 0:
-                    dst[base + j] = acc / Float64(count)
+                    dst[unsafe_offset=base + j] = acc / Float64(count)
             else:
-                dst[base + j] = acc
+                dst[unsafe_offset=base + j] = acc
 
 
 def move_sum_mean_kernel(
@@ -215,9 +217,7 @@ def move_sum_mean_kernel(
 ):
     if mean_mode:
         for row in range(outer):
-            move_sum_mean_range[True](
-                src, dst, n, row, 0, n, window, min_count
-            )
+            move_sum_mean_range[True](src, dst, n, row, 0, n, window, min_count)
     else:
         for row in range(outer):
             move_sum_mean_range[False](
@@ -225,7 +225,9 @@ def move_sum_mean_kernel(
             )
 
 
-def move_var_range[std_mode: Bool](
+def move_var_range[
+    std_mode: Bool
+](
     src: FPtr,
     dst: FPtr,
     n: Int,
@@ -242,7 +244,7 @@ def move_var_range[std_mode: Bool](
     var m2 = 0.0
     var initial = max(0, start - window)
     for j in range(initial, start):
-        var value = src[base + j]
+        var value = src[unsafe_offset=base + j]
         if not isnan(value):
             count += 1
             var delta = value - mean
@@ -250,7 +252,7 @@ def move_var_range[std_mode: Bool](
             m2 += delta * (value - mean)
     for j in range(start, end):
         if j >= window:
-            var leaving = src[base + j - window]
+            var leaving = src[unsafe_offset=base + j - window]
             if not isnan(leaving):
                 if count == 1:
                     count = 0
@@ -262,7 +264,7 @@ def move_var_range[std_mode: Bool](
                     mean -= delta / Float64(new_count)
                     m2 -= delta * (leaving - mean)
                     count = new_count
-        var entering = src[base + j]
+        var entering = src[unsafe_offset=base + j]
         if not isnan(entering):
             count += 1
             var delta = entering - mean
@@ -273,12 +275,14 @@ def move_var_range[std_mode: Bool](
             if variance < 0.0:
                 variance = 0.0
             comptime if std_mode:
-                dst[base + j] = sqrt(variance)
+                dst[unsafe_offset=base + j] = sqrt(variance)
             else:
-                dst[base + j] = variance
+                dst[unsafe_offset=base + j] = variance
 
 
-def move_var_impl[std_mode: Bool](
+def move_var_impl[
+    std_mode: Bool
+](
     src: FPtr,
     dst: FPtr,
     outer: Int,
@@ -305,7 +309,8 @@ def move_var_impl[std_mode: Bool](
             src, dst, n, row, start, end, window, min_count, ddof
         )
 
-    parallelize[work](tasks, PARALLEL_WORKERS)
+    for task in range(tasks):
+        work(task)
 
 
 def move_var_kernel(
@@ -324,7 +329,9 @@ def move_var_kernel(
         move_var_impl[False](src, dst, outer, n, window, min_count, ddof)
 
 
-def move_extreme_range[find_max: Bool](
+def move_extreme_range[
+    find_max: Bool
+](
     src: FPtr,
     dst: FPtr,
     scratch: IPtr,
@@ -340,12 +347,14 @@ def move_extreme_range[find_max: Bool](
     var count = 0
     var initial = max(0, start - window)
     for j in range(initial, start):
-        var entering = src[j]
+        var entering = src[unsafe_offset=j]
         if not isnan(entering):
             count += 1
             while head < tail:
-                var last = Int(scratch[scratch_base + (tail - 1) % window])
-                var last_value = src[last]
+                var last = Int(
+                    scratch[unsafe_offset=scratch_base + (tail - 1) % window]
+                )
+                var last_value = src[unsafe_offset=last]
                 comptime if find_max:
                     if last_value > entering:
                         break
@@ -353,22 +362,25 @@ def move_extreme_range[find_max: Bool](
                     if last_value < entering:
                         break
                 tail -= 1
-            scratch[scratch_base + tail % window] = Int64(j)
+            scratch[unsafe_offset=scratch_base + tail % window] = Int64(j)
             tail += 1
     for j in range(start, end):
-        if j >= window and not isnan(src[j - window]):
+        if j >= window and not isnan(src[unsafe_offset=j - window]):
             count -= 1
         while (
             head < tail
-            and Int(scratch[scratch_base + head % window]) <= j - window
+            and Int(scratch[unsafe_offset=scratch_base + head % window])
+            <= j - window
         ):
             head += 1
-        var entering = src[j]
+        var entering = src[unsafe_offset=j]
         if not isnan(entering):
             count += 1
             while head < tail:
-                var last = Int(scratch[scratch_base + (tail - 1) % window])
-                var last_value = src[last]
+                var last = Int(
+                    scratch[unsafe_offset=scratch_base + (tail - 1) % window]
+                )
+                var last_value = src[unsafe_offset=last]
                 comptime if find_max:
                     if last_value > entering:
                         break
@@ -376,13 +388,19 @@ def move_extreme_range[find_max: Bool](
                     if last_value < entering:
                         break
                 tail -= 1
-            scratch[scratch_base + tail % window] = Int64(j)
+            scratch[unsafe_offset=scratch_base + tail % window] = Int64(j)
             tail += 1
         if count >= min_count and head < tail:
-            dst[j] = src[Int(scratch[scratch_base + head % window])]
+            dst[unsafe_offset=j] = src[
+                unsafe_offset=Int(
+                    scratch[unsafe_offset=scratch_base + head % window]
+                )
+            ]
 
 
-def move_extreme_impl[find_max: Bool](
+def move_extreme_impl[
+    find_max: Bool
+](
     src: FPtr,
     dst: FPtr,
     scratch: IPtr,
@@ -414,7 +432,8 @@ def move_extreme_impl[find_max: Bool](
                 task * window,
             )
 
-        parallelize[work](tasks, PARALLEL_WORKERS)
+        for task in range(tasks):
+            work(task)
         return
     for row in range(outer):
         var base = row * n
@@ -422,16 +441,18 @@ def move_extreme_impl[find_max: Bool](
         var tail = 0
         var count = 0
         for j in range(n):
-            if j >= window and not isnan(src[base + j - window]):
+            if j >= window and not isnan(src[unsafe_offset=base + j - window]):
                 count -= 1
-            while head < tail and Int(scratch[head]) <= j - window:
+            while (
+                head < tail and Int(scratch[unsafe_offset=head]) <= j - window
+            ):
                 head += 1
-            var entering = src[base + j]
+            var entering = src[unsafe_offset=base + j]
             if not isnan(entering):
                 count += 1
                 while head < tail:
-                    var last = Int(scratch[tail - 1])
-                    var last_value = src[base + last]
+                    var last = Int(scratch[unsafe_offset=tail - 1])
+                    var last_value = src[unsafe_offset=base + last]
                     comptime if find_max:
                         if last_value > entering:
                             break
@@ -439,10 +460,12 @@ def move_extreme_impl[find_max: Bool](
                         if last_value < entering:
                             break
                     tail -= 1
-                scratch[tail] = Int64(j)
+                scratch[unsafe_offset=tail] = Int64(j)
                 tail += 1
             if count >= min_count and head < tail:
-                dst[base + j] = src[base + Int(scratch[head])]
+                dst[unsafe_offset=base + j] = src[
+                    unsafe_offset=base + Int(scratch[unsafe_offset=head])
+                ]
 
 
 def move_extreme_kernel(
