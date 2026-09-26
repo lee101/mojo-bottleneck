@@ -1,7 +1,6 @@
 """Float64 kernels exported through a small C ABI."""
 
 from std.math import isnan, nan, sqrt
-from max.algorithm import parallelize
 from std.sys import simd_width_of
 
 comptime FPtr = Pointer[Float64, AnyOrigin[mut=True]]
@@ -9,7 +8,6 @@ comptime IPtr = Pointer[Int64, AnyOrigin[mut=True]]
 comptime PARALLEL_THRESHOLD = 262144
 comptime PARALLEL_CHUNK = 262144
 comptime MAX_PARALLEL_WORKERS = 16
-comptime SUM_PARALLEL_WORKERS = 4
 comptime NAN = nan[DType.float64]()
 
 
@@ -240,7 +238,7 @@ def move_sum_mean_kernel(
     var tasks = outer * chunks_per_row
     if outer * n >= PARALLEL_THRESHOLD and tasks > 1:
 
-        def work(task: Int) capturing:
+        for task in range(tasks):
             var row = task // chunks_per_row
             var chunk = task - row * chunks_per_row
             var start = chunk * PARALLEL_CHUNK
@@ -253,8 +251,6 @@ def move_sum_mean_kernel(
                 move_sum_mean_range[False](
                     src, dst, n, row, start, end, window, min_count
                 )
-
-        parallelize[work](tasks, min(tasks, SUM_PARALLEL_WORKERS))
         return
     if mean_mode:
         for row in range(outer):
@@ -343,7 +339,7 @@ def move_var_impl[
             )
         return
 
-    def work(task: Int) capturing:
+    for task in range(tasks):
         var row = task // chunks_per_row
         var chunk = task - row * chunks_per_row
         var start = chunk * PARALLEL_CHUNK
@@ -351,8 +347,6 @@ def move_var_impl[
         move_var_range[std_mode](
             src, dst, n, row, start, end, window, min_count, ddof
         )
-
-    parallelize[work](tasks, min(tasks, MAX_PARALLEL_WORKERS))
 
 
 def move_var_kernel(
@@ -461,7 +455,7 @@ def move_extreme_impl[
         and tasks * window <= n
     ):
 
-        def work(task: Int) capturing:
+        for task in range(tasks):
             var start = task * PARALLEL_CHUNK
             var end = min(n, start + PARALLEL_CHUNK)
             move_extreme_range[find_max](
@@ -475,8 +469,6 @@ def move_extreme_impl[
                 min_count,
                 task * window,
             )
-
-        parallelize[work](tasks, min(tasks, MAX_PARALLEL_WORKERS))
         return
     for row in range(outer):
         var base = row * n
