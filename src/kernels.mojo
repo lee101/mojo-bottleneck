@@ -1,6 +1,6 @@
 """Float64 kernels exported through a small C ABI."""
 
-from std.math import isnan, nan, sqrt
+from std.math import isinf, isnan, nan, sqrt
 from std.sys import simd_width_of
 
 comptime FPtr = Pointer[Float64, AnyOrigin[mut=True]]
@@ -73,6 +73,9 @@ def reduce_kernel(src: FPtr, dst: FPtr, outer: Int, n: Int, op: Int, ddof: Int):
         elif op == 1:
             if count > 0:
                 dst[unsafe_offset=row] = acc / Float64(count)
+        # Matches bottleneck nanvar/nanstd: count==0 with ddof<0 yields 0.0 (0/(count-ddof)).
+        elif (op == 2 or op == 3) and count == 0 and ddof < 0:
+            dst[unsafe_offset=row] = 0.0
         elif (op == 2 or op == 3) and count > 0 and count - ddof > 0:
             var mean = acc / Float64(count)
             var squared = 0.0
@@ -293,8 +296,14 @@ def move_var_range[
             if not isnan(leaving):
                 if count == 1:
                     count = 0
-                    mean = 0.0
-                    m2 = 0.0
+                    # Matches bottleneck move_var/move_std: an infinite value leaving the
+                    # window poisons the rolling accumulator (it does not reset cleanly).
+                    if isinf(leaving) or isnan(mean) or isnan(m2):
+                        mean = NAN
+                        m2 = NAN
+                    else:
+                        mean = 0.0
+                        m2 = 0.0
                 else:
                     var new_count = count - 1
                     var delta = leaving - mean
@@ -307,9 +316,11 @@ def move_var_range[
             var delta = entering - mean
             mean += delta / Float64(count)
             m2 += delta * (entering - mean)
-        if count >= min_count and count > 0 and count - ddof > 0:
+        # Matches bottleneck move_var/move_std: divide by (count-ddof) even when it is
+        # zero or negative (upstream fast path yields inf/negative, not NaN).
+        if count >= min_count and count > 0:
             var variance = m2 / Float64(count - ddof)
-            if variance < 0.0:
+            if count - ddof > 0 and variance < 0.0:
                 variance = 0.0
             comptime if std_mode:
                 dst[unsafe_offset=base + j] = sqrt(variance)

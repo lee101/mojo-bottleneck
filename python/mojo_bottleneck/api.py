@@ -25,17 +25,37 @@ def _array(a) -> np.ndarray:
     return array
 
 
+def _int_arg(value, msg: str) -> int:
+    # Matches bottleneck argument validation (TypeError): bools and non-integers
+    # are rejected, e.g. "`axis` must be an integer or None" for nan*/move_*.
+    if isinstance(value, bool):
+        raise TypeError(msg)
+    try:
+        return operator.index(value)
+    except TypeError:
+        raise TypeError(msg) from None
+
+
 def _axis(axis, ndim: int, *, allow_none: bool) -> int | None:
     if axis is None:
         if allow_none:
             return None
-        raise TypeError("axis must be an integer")
-    axis = operator.index(axis)
+        raise TypeError("`axis` must be an integer")
+    axis = _int_arg(
+        axis,
+        "`axis` must be an integer or None" if allow_none else "`axis` must be an integer",
+    )
     if axis < 0:
         axis += ndim
     if axis < 0 or axis >= ndim:
         raise np.exceptions.AxisError(axis, ndim=ndim)
     return axis
+
+
+def _axis_length(array: np.ndarray, normalized) -> int:
+    # Matches bottleneck nanmin/nanmax/nanargmin/nanargmax: a zero-length
+    # reduction axis raises ValueError even when the result would be empty.
+    return int(array.size) if normalized is None else int(array.shape[normalized])
 
 
 def _work_along_axis(array: np.ndarray, axis):
@@ -51,6 +71,12 @@ def _work_along_axis(array: np.ndarray, axis):
 
 def _reduction(a, axis, name: str, ddof: int = 0):
     array = _array(a)
+    _axis(axis, array.ndim, allow_none=True)
+    if name in {"var", "std"}:
+        ddof = _int_arg(ddof, "`ddof` must be an integer")
+    if name in {"min", "max"} and _axis_length(array, _axis(axis, array.ndim, allow_none=True)) == 0:
+        # Matches bottleneck nanmin/nanmax on zero-size reductions (ValueError).
+        raise ValueError("zero-size array to reduction operation")
     if name in {"sum", "min", "max"} and array.dtype.kind in "biu":
         fn = {"sum": np.sum, "min": np.min, "max": np.max}[name]
         dtype = None
@@ -81,8 +107,6 @@ def _reduction(a, axis, name: str, ddof: int = 0):
             result = fn(array, **kwargs)
         return result.item() if np.ndim(result) == 0 else result
     work, result_shape = _work_along_axis(array, axis)
-    if name in {"min", "max"} and work.shape[1] == 0 and work.shape[0]:
-        raise ValueError("zero-size array to reduction operation")
     result = np.full(work.shape[0], np.nan, dtype=np.float64)
     if work.shape[0]:
         checked_call(
@@ -92,7 +116,7 @@ def _reduction(a, axis, name: str, ddof: int = 0):
             work.shape[0],
             work.shape[1],
             _REDUCE_OP[name],
-            operator.index(ddof),
+            ddof,
         )
     if array.dtype == np.float32:
         result = result.astype(np.float32)
@@ -134,6 +158,7 @@ def allnan(a, axis=None):
 
 def _boolean_reduction(a, axis, name):
     array = _array(a)
+    _axis(axis, array.ndim, allow_none=True)
     if array.dtype.kind in "biu":
         fn = np.any if name == "any" else np.all
         result = fn(np.isnan(array), axis=axis)
@@ -151,6 +176,7 @@ def _boolean_reduction(a, axis, name):
 
 def nanmedian(a, axis=None):
     array = _array(a)
+    _axis(axis, array.ndim, allow_none=True)
     if array.dtype.kind == "f" and array.dtype not in (np.float32, np.float64):
         with np.errstate(all="ignore"):
             result = np.nanmedian(array, axis=axis)
@@ -171,6 +197,9 @@ def nanmedian(a, axis=None):
 def _arg_reduction(a, axis, find_max: bool):
     array = _array(a)
     normalized = _axis(axis, array.ndim, allow_none=True)
+    if _axis_length(array, normalized) == 0:
+        # Matches bottleneck nanargmin/nanargmax on zero-size reductions (ValueError).
+        raise ValueError("zero-size array to reduction operation")
     if array.dtype.kind in "biu":
         fn = np.argmax if find_max else np.argmin
         return fn(array, axis=normalized)
@@ -178,8 +207,6 @@ def _arg_reduction(a, axis, find_max: bool):
         fn = np.nanargmax if find_max else np.nanargmin
         return fn(array, axis=normalized)
     work, result_shape = _work_along_axis(array, normalized)
-    if work.shape[1] == 0 and work.shape[0]:
-        raise ValueError("zero-size array to reduction operation")
     result = np.full(work.shape[0], -1, dtype=np.int64)
     invalid = 0
     if work.shape[0]:
@@ -207,8 +234,11 @@ def _move_args(a, window, min_count, axis):
         raise TypeError(
             f"moving-window kernels do not support {array.dtype} without narrowing"
         )
+    # Matches bottleneck move_*: scalar input requires ndim > 0 (ValueError).
+    if array.ndim == 0:
+        raise ValueError("moving window functions require ndim > 0")
     normalized = _axis(axis, array.ndim, allow_none=False)
-    window = operator.index(window)
+    window = _int_arg(window, "`window` must be an integer")
     if window < 1:
         raise ValueError("window must be positive")
     if window > array.shape[normalized]:
@@ -217,7 +247,7 @@ def _move_args(a, window, min_count, axis):
     if min_count is None:
         min_count = window
     else:
-        min_count = operator.index(min_count)
+        min_count = _int_arg(min_count, "`min_count` must be an integer or None")
     if min_count <= 0:
         raise ValueError("min_count must be greater than zero")
     if min_count > window:
@@ -263,6 +293,7 @@ def move_mean(a, window, min_count=None, axis=-1):
 
 
 def _move_variance(a, window, min_count, axis, ddof, std_mode):
+    ddof = _int_arg(ddof, "`ddof` must be an integer")
     array, normalized, window, min_count, rows, result = _move_args(
         a, window, min_count, axis
     )
@@ -275,7 +306,7 @@ def _move_variance(a, window, min_count, axis, ddof, std_mode):
             rows.shape[1],
             window,
             min_count,
-            operator.index(ddof),
+            ddof,
             int(std_mode),
         )
     return _finish_move(array, normalized, result)
