@@ -82,17 +82,18 @@ warm runs on one-dimensional `float64` inputs containing NaNs. A ratio above
 
 | operation | mojo-bottleneck | bottleneck | upstream / Mojo |
 |---|---:|---:|---:|
-| nansum, 5M | 4.89 ms | 5.61 ms | 1.15x |
-| nanmean, 5M | 4.73 ms | 5.89 ms | 1.25x |
-| nanstd, 5M | 8.09 ms | 11.90 ms | 1.47x |
-| nanmedian, 1M | 11.24 ms | 10.75 ms | 0.96x |
-| move_sum, 5M w=100 | 15.16 ms | 23.58 ms | 1.55x |
-| move_var, 5M w=100 | 20.02 ms | 38.63 ms | 1.93x |
-| move_min, 5M w=100 | 46.69 ms | 94.94 ms | 2.03x |
-| move_max, 5M w=100 | 45.22 ms | 76.64 ms | 1.69x |
+| nansum, 5M | 4.02 ms | 5.99 ms | 1.49x |
+| nanmean, 5M | 3.92 ms | 5.84 ms | 1.49x |
+| nanstd, 5M | 6.59 ms | 11.97 ms | 1.82x |
+| nanmedian, 1M | 11.23 ms | 11.82 ms | 1.05x |
+| move_sum, 5M w=100 | 23.78 ms | 20.97 ms | 0.88x |
+| move_var, 5M w=100 | 92.56 ms | 31.99 ms | 0.35x |
+| move_min, 5M w=100 | 252.29 ms | 78.08 ms | 0.31x |
+| move_max, 5M w=100 | 257.82 ms | 78.54 ms | 0.30x |
 
-Mojo wins on seven of the eight measured kernels in this run and is near
-parity on `nanmedian`. These timings include Python wrapper and
+Mojo wins on four of the eight measured kernels in this run and is near
+parity on `nanmedian`. It is slower on all four moving-window kernels.
+These timings include Python wrapper and
 output-allocation costs. No GPU path is provided: the covered reductions and
 rolling kernels are memory-bound or recurrence-bound and remain below the
 roughly two-flops-per-byte threshold where transfer and launch costs can pay
